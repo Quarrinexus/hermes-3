@@ -14,6 +14,7 @@
 #include <bout/output_bout_types.hxx>
 #include <bout/solver.hxx>
 
+#include <algorithm>
 #include <cmath>
 
 #include "../include/component.hxx"
@@ -87,56 +88,94 @@ EvolveMomentum::EvolveMomentum(std::string name, Options& alloptions, Solver* so
                "next to every Y target (found via mesh->iterateBndryLowerY/UpperY, "
                "which fire at all double-null targets including internal ny_inner "
                "splices, not just y=0/y=ny-1) with the sheath saturation momentum "
-               "computed from this species' own Ne/Pe initial-condition functions. "
-               "Only implemented for the electron species ('e'). Intended to avoid "
-               "CVODE having to resolve a large 0-to-sheath-value transient in "
-               "Ve/NVe at the very first timestep.")
+               "computed from this species' own initial-condition functions. "
+               "Implemented for the electron species ('e', exact formula) and the "
+               "single ion species ('d+', approximate Bohm speed -- see source "
+               "comment). Intended to avoid CVODE having to resolve a large "
+               "0-to-sheath-value transient in V/NV at the very first timestep.")
           .withDefault<bool>(false);
 
   if (seed_sheath_velocity_ic and !alloptions["hermes"]["restarting"]) {
-    if (name != "e") {
-      throw BoutException("seed_sheath_velocity_ic is only implemented for the "
-                          "electron species ('e'), not '{:s}'",
+    if (name != "e" and name != "d+") {
+      throw BoutException("seed_sheath_velocity_ic is only implemented for "
+                          "'e' and 'd+', not '{:s}'",
                           name);
     }
 
-    // Independently re-read this species' own density/pressure IC functions
+    // Independently re-read the density/pressure IC functions this needs
     // (the same functions evolve_density/evolve_pressure will use), so the
-    // seed is consistent with the actual t=0 Ne/Te without needing to reach
-    // into those components' internal state.
+    // seed is consistent with the actual t=0 profiles without needing to
+    // reach into those components' internal state.
     Field3D Ne_ic, Pe_ic;
     initial_profile("Ne", Ne_ic);
     initial_profile("Pe", Pe_ic);
 
-    // Note: deliberately not reading options["AA"] here even if set -- at
-    // construction time this is still the raw, unevaluated config string
-    // (e.g. "1 / 1836"), and the plain scalar option parser can't evaluate
-    // arithmetic expressions (unlike the state-tree "species:AA" path other
-    // components read from, which is already-evaluated by the time
-    // transform_impl runs). Electrons only, so the physical constant is
-    // always the correct value.
-    const BoutReal Me = SI::Me / SI::Mp;
+    // Note: deliberately not reading options["AA"]/["charge"] here even if
+    // set -- at construction time this is still the raw, unevaluated config
+    // string (e.g. electron AA = "1 / 1836"), and the plain scalar option
+    // parser can't evaluate arithmetic expressions (unlike the state-tree
+    // "species:AA" path other components read from, which is
+    // already-evaluated by the time transform_impl runs). Physical/config
+    // constants are used directly instead.
 
     // Sign convention matches SheathBoundary: velocity points out of the
     // domain through the target (negative at a lower_y target, positive at
     // an upper_y target).
-    auto seed_column = [&](RangeIterator r, int yindex, BoutReal sign) {
-      for (; !r.isDone(); r++) {
-        for (int jz = 0; jz < mesh->LocalNz; jz++) {
-          const BoutReal ne = Ne_ic(r.ind, yindex, jz);
-          const BoutReal pe = Pe_ic(r.ind, yindex, jz);
-          if (ne <= 0.0) {
-            continue;
+    if (name == "e") {
+      const BoutReal Me = SI::Me / SI::Mp;
+      auto seed_column = [&](RangeIterator r, int yindex, BoutReal sign) {
+        for (; !r.isDone(); r++) {
+          for (int jz = 0; jz < mesh->LocalNz; jz++) {
+            const BoutReal ne = Ne_ic(r.ind, yindex, jz);
+            const BoutReal pe = Pe_ic(r.ind, yindex, jz);
+            if (ne <= 0.0) {
+              continue;
+            }
+            const BoutReal te = pe / ne;
+            const BoutReal vesheath = sign * sqrt(te / (TWOPI * Me));
+            NV(r.ind, yindex, jz) = Me * ne * vesheath;
           }
-          const BoutReal te = pe / ne;
-          const BoutReal vesheath = sign * sqrt(te / (TWOPI * Me));
-          NV(r.ind, yindex, jz) = Me * ne * vesheath;
         }
-      }
-    };
+      };
+      seed_column(mesh->iterateBndryLowerY(), mesh->ystart, -1.0);
+      seed_column(mesh->iterateBndryUpperY(), mesh->yend, 1.0);
+    } else {
+      // d+: approximate ion sheath (Bohm) speed. The full formula in
+      // sheath_boundary.cxx depends on an ion-concentration factor s_i and
+      // finite-difference grad_ne/grad_ni ratios; for this single-ion-species
+      // quasineutral plasma (Nd+ == Ne, see quasineutral.cxx) both are
+      // approximately 1, simplifying to the standard Bohm/ion-acoustic speed
+      // C_i^2 = (adiabatic*Ti + Zi*Te) / Mi.
+      Field3D Pd_ic;
+      initial_profile("Pd+", Pd_ic);
 
-    seed_column(mesh->iterateBndryLowerY(), mesh->ystart, -1.0);
-    seed_column(mesh->iterateBndryUpperY(), mesh->yend, 1.0);
+      const BoutReal Mi = 2.0;         // AA for d+ (deuterium), a plain
+                                        // literal in this config, not an
+                                        // expression -- safe to hardcode
+      const BoutReal Zi = 1.0;         // charge for d+
+      const BoutReal adiabatic = 5. / 3.;
+
+      auto seed_column = [&](RangeIterator r, int yindex, BoutReal sign) {
+        for (; !r.isDone(); r++) {
+          for (int jz = 0; jz < mesh->LocalNz; jz++) {
+            const BoutReal ne = Ne_ic(r.ind, yindex, jz); // Ni == Ne here
+            const BoutReal pe = Pe_ic(r.ind, yindex, jz);
+            const BoutReal pi = Pd_ic(r.ind, yindex, jz);
+            if (ne <= 0.0) {
+              continue;
+            }
+            const BoutReal te = pe / ne;
+            const BoutReal ti = pi / ne;
+            const BoutReal C_i_sq =
+                std::clamp((adiabatic * ti + Zi * te) / Mi, 0.0, 100.0);
+            const BoutReal visheath = sign * sqrt(C_i_sq);
+            NV(r.ind, yindex, jz) = Mi * ne * visheath;
+          }
+        }
+      };
+      seed_column(mesh->iterateBndryLowerY(), mesh->ystart, -1.0);
+      seed_column(mesh->iterateBndryUpperY(), mesh->yend, 1.0);
+    }
   }
 
   substitutePermissions("name", {name});
