@@ -108,8 +108,14 @@ EvolveMomentum::EvolveMomentum(std::string name, Options& alloptions, Solver* so
     initial_profile("Ne", Ne_ic);
     initial_profile("Pe", Pe_ic);
 
-    const BoutReal Me =
-        options.isSet("AA") ? get<BoutReal>(options["AA"]) : SI::Me / SI::Mp;
+    // Note: deliberately not reading options["AA"] here even if set -- at
+    // construction time this is still the raw, unevaluated config string
+    // (e.g. "1 / 1836"), and the plain scalar option parser can't evaluate
+    // arithmetic expressions (unlike the state-tree "species:AA" path other
+    // components read from, which is already-evaluated by the time
+    // transform_impl runs). Electrons only, so the physical constant is
+    // always the correct value.
+    const BoutReal Me = SI::Me / SI::Mp;
 
     // Sign convention matches SheathBoundary: velocity points out of the
     // domain through the target (negative at a lower_y target, positive at
