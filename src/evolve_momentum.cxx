@@ -8,10 +8,13 @@
 #include <bout/field3d.hxx>
 #include <bout/fv_ops.hxx>
 #include <bout/globals.hxx>
+#include <bout/initialprofiles.hxx>
 #include <bout/options.hxx>
 #include <bout/output.hxx>
 #include <bout/output_bout_types.hxx>
 #include <bout/solver.hxx>
+
+#include <cmath>
 
 #include "../include/component.hxx"
 #include "../include/div_ops.hxx"
@@ -77,6 +80,58 @@ EvolveMomentum::EvolveMomentum(std::string name, Options& alloptions, Solver* so
   // Set to zero so set for output
   momentum_source = 0.0;
   NV_err = 0.0;
+
+  const bool seed_sheath_velocity_ic =
+      options["seed_sheath_velocity_ic"]
+          .doc("At t=0 (cold start only), overwrite NV at the last physical cell "
+               "next to every Y target (found via mesh->iterateBndryLowerY/UpperY, "
+               "which fire at all double-null targets including internal ny_inner "
+               "splices, not just y=0/y=ny-1) with the sheath saturation momentum "
+               "computed from this species' own Ne/Pe initial-condition functions. "
+               "Only implemented for the electron species ('e'). Intended to avoid "
+               "CVODE having to resolve a large 0-to-sheath-value transient in "
+               "Ve/NVe at the very first timestep.")
+          .withDefault<bool>(false);
+
+  if (seed_sheath_velocity_ic and !alloptions["hermes"]["restarting"]) {
+    if (name != "e") {
+      throw BoutException("seed_sheath_velocity_ic is only implemented for the "
+                          "electron species ('e'), not '{:s}'",
+                          name);
+    }
+
+    // Independently re-read this species' own density/pressure IC functions
+    // (the same functions evolve_density/evolve_pressure will use), so the
+    // seed is consistent with the actual t=0 Ne/Te without needing to reach
+    // into those components' internal state.
+    Field3D Ne_ic, Pe_ic;
+    initial_profile("Ne", Ne_ic);
+    initial_profile("Pe", Pe_ic);
+
+    const BoutReal Me =
+        options.isSet("AA") ? get<BoutReal>(options["AA"]) : SI::Me / SI::Mp;
+
+    // Sign convention matches SheathBoundary: velocity points out of the
+    // domain through the target (negative at a lower_y target, positive at
+    // an upper_y target).
+    auto seed_column = [&](RangeIterator r, int yindex, BoutReal sign) {
+      for (; !r.isDone(); r++) {
+        for (int jz = 0; jz < mesh->LocalNz; jz++) {
+          const BoutReal ne = Ne_ic(r.ind, yindex, jz);
+          const BoutReal pe = Pe_ic(r.ind, yindex, jz);
+          if (ne <= 0.0) {
+            continue;
+          }
+          const BoutReal te = pe / ne;
+          const BoutReal vesheath = sign * sqrt(te / (TWOPI * Me));
+          NV(r.ind, yindex, jz) = Me * ne * vesheath;
+        }
+      }
+    };
+
+    seed_column(mesh->iterateBndryLowerY(), mesh->ystart, -1.0);
+    seed_column(mesh->iterateBndryUpperY(), mesh->yend, 1.0);
+  }
 
   substitutePermissions("name", {name});
   substitutePermissions("outputs", {"velocity", "momentum"});
