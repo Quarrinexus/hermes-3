@@ -269,29 +269,32 @@ void EvolvePressure::finally(const Options& state) {
   P.setBoundaryTo(get<Field3D>(species["pressure"]));
 
   if (core_boundary_relax) {
-    // The guard-cell write must happen on every call, not just when time has
-    // advanced -- neumann_boundary_average_z's code in transform_impl runs
-    // unconditionally on every RHS call (including repeated Newton-iteration
-    // calls at the same reported time) and overwrites these same guard cells,
-    // so gating the write itself (rather than just the weight update) meant
-    // this relaxation lost that race every time and had no lasting effect.
+    // Track the intended boundary value analytically, as an explicit function
+    // of elapsed time since this relaxation first applied, rather than
+    // blending against the guard cell's own previous value. The guard cell
+    // has no memory of its own to blend against: neumann_boundary_average_z's
+    // code in transform_impl rederives it from scratch from the interior
+    // value on every call, so a blend against it can never accumulate
+    // progress toward the target -- confirmed numerically, the boundary only
+    // crept by a tiny fixed offset per step rather than converging.
     const BoutReal time = get<BoutReal>(state["time"]);
 
-    if (core_boundary_last_update < 0.0) {
-      core_boundary_last_update = time;
-    } else if (time > core_boundary_last_update) {
-      core_boundary_weight =
-          exp(-(time - core_boundary_last_update) / core_boundary_timescale);
-      core_boundary_last_update = time;
-    }
-
     if (mesh->firstX() && mesh->periodicY(mesh->xstart)) {
+      if (core_boundary_ramp_start_time < 0.0) {
+        core_boundary_ramp_start_time = time;
+        core_boundary_initial_value =
+            0.5 * (P(mesh->xstart - 1, mesh->ystart, 0) + P(mesh->xstart, mesh->ystart, 0));
+      }
+
+      const BoutReal elapsed = time - core_boundary_ramp_start_time;
+      const BoutReal current_value =
+          core_boundary_target
+          - (core_boundary_target - core_boundary_initial_value)
+                * exp(-elapsed / core_boundary_timescale);
+
       for (int y = mesh->ystart; y <= mesh->yend; y++) {
         for (int z = 0; z < mesh->LocalNz; z++) {
-          const BoutReal target_bndry =
-              2.0 * core_boundary_target - P(mesh->xstart, y, z);
-          const BoutReal new_bndry = core_boundary_weight * P(mesh->xstart - 1, y, z)
-                                      + (1.0 - core_boundary_weight) * target_bndry;
+          const BoutReal new_bndry = 2.0 * current_value - P(mesh->xstart, y, z);
           P(mesh->xstart - 1, y, z) = new_bndry;
           P(mesh->xstart - 2, y, z) = new_bndry;
         }

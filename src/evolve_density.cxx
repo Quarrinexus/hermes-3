@@ -276,34 +276,41 @@ void EvolveDensity::finally(const Options& state) {
   N.setBoundaryTo(get<Field3D>(species["density"]));
 
   if (core_boundary_relax) {
-    // Same exponential-relaxation idiom as vorticity.cxx's phi_boundary_relax,
-    // but the guard-cell write itself must happen on *every* call, not just
-    // when time has advanced: neumann_boundary_average_z's code above (in
-    // transform_impl, called before finally() on every RHS call, including
-    // repeated Newton-iteration/Jacobian calls at the same reported time)
-    // unconditionally overwrites these same guard cells. Gating the write
-    // itself (rather than just the weight update) meant this relaxation lost
-    // that race every time and had no lasting effect at all.
+    // Track the intended boundary value analytically, as an explicit function
+    // of elapsed time since this relaxation first applied, rather than
+    // blending against the guard cell's own previous value. The guard cell
+    // has no memory of its own to blend against: neumann_boundary_average_z's
+    // code above (in transform_impl, called before finally() on every RHS
+    // call) rederives it from scratch from the interior value every time, so
+    // a blend against it can never accumulate progress toward the target --
+    // confirmed numerically, the boundary only crept by a tiny fixed offset
+    // per step rather than converging toward core_boundary_target.
     const BoutReal time = get<BoutReal>(state["time"]);
-
-    if (core_boundary_last_update < 0.0) {
-      core_boundary_last_update = time;
-    } else if (time > core_boundary_last_update) {
-      core_boundary_weight =
-          exp(-(time - core_boundary_last_update) / core_boundary_timescale);
-      core_boundary_last_update = time;
-    }
 
     if (mesh->firstX() && mesh->periodicY(mesh->xstart)) {
       // Restrict to the closed-flux-surface core -- same periodicY(x) check
       // already used by source_only_in_core above -- not any private-flux
       // leg that may also touch x=0.
+      if (core_boundary_ramp_start_time < 0.0) {
+        core_boundary_ramp_start_time = time;
+        // Capture the current dirichlet-equivalent boundary value once, as
+        // the starting point for the exponential approach to
+        // core_boundary_target. A single scalar (not per-y) keeps this
+        // analytic and simple; restarting a later link re-captures this
+        // fresh from that link's own restart state.
+        core_boundary_initial_value =
+            0.5 * (N(mesh->xstart - 1, mesh->ystart, 0) + N(mesh->xstart, mesh->ystart, 0));
+      }
+
+      const BoutReal elapsed = time - core_boundary_ramp_start_time;
+      const BoutReal current_value =
+          core_boundary_target
+          - (core_boundary_target - core_boundary_initial_value)
+                * exp(-elapsed / core_boundary_timescale);
+
       for (int y = mesh->ystart; y <= mesh->yend; y++) {
         for (int z = 0; z < mesh->LocalNz; z++) {
-          const BoutReal target_bndry =
-              2.0 * core_boundary_target - N(mesh->xstart, y, z);
-          const BoutReal new_bndry = core_boundary_weight * N(mesh->xstart - 1, y, z)
-                                      + (1.0 - core_boundary_weight) * target_bndry;
+          const BoutReal new_bndry = 2.0 * current_value - N(mesh->xstart, y, z);
           N(mesh->xstart - 1, y, z) = new_bndry;
           N(mesh->xstart - 2, y, z) = new_bndry;
         }

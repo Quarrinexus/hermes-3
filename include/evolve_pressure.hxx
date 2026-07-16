@@ -70,11 +70,8 @@ private:
   bool core_boundary_relax;           ///< Relax the core (x=0) boundary toward a target?
   BoutReal core_boundary_target;      ///< Target value for the core boundary [normalised]
   BoutReal core_boundary_timescale;   ///< Relaxation timescale [normalised time]
-  BoutReal core_boundary_last_update{-1.0}; ///< Time of last core boundary update
-  BoutReal core_boundary_weight{1.0}; ///< Last computed relaxation weight, reapplied on
-                                      ///< repeated-same-time RHS calls so this always
-                                      ///< wins over neumann_boundary_average_z's
-                                      ///< unconditional reset in transform_impl
+  BoutReal core_boundary_ramp_start_time{-1.0}; ///< Time this relaxation first applied
+  BoutReal core_boundary_initial_value{0.0};    ///< Boundary value captured at ramp start
 
   bool p_div_v; ///< Use p*Div(v) form? False -> v * Grad(p)
 
