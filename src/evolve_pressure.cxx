@@ -269,25 +269,31 @@ void EvolvePressure::finally(const Options& state) {
   P.setBoundaryTo(get<Field3D>(species["pressure"]));
 
   if (core_boundary_relax) {
+    // The guard-cell write must happen on every call, not just when time has
+    // advanced -- neumann_boundary_average_z's code in transform_impl runs
+    // unconditionally on every RHS call (including repeated Newton-iteration
+    // calls at the same reported time) and overwrites these same guard cells,
+    // so gating the write itself (rather than just the weight update) meant
+    // this relaxation lost that race every time and had no lasting effect.
     const BoutReal time = get<BoutReal>(state["time"]);
 
     if (core_boundary_last_update < 0.0) {
       core_boundary_last_update = time;
     } else if (time > core_boundary_last_update) {
-      const BoutReal weight =
+      core_boundary_weight =
           exp(-(time - core_boundary_last_update) / core_boundary_timescale);
       core_boundary_last_update = time;
+    }
 
-      if (mesh->firstX() && mesh->periodicY(mesh->xstart)) {
-        for (int y = mesh->ystart; y <= mesh->yend; y++) {
-          for (int z = 0; z < mesh->LocalNz; z++) {
-            const BoutReal target_bndry =
-                2.0 * core_boundary_target - P(mesh->xstart, y, z);
-            const BoutReal new_bndry =
-                weight * P(mesh->xstart - 1, y, z) + (1.0 - weight) * target_bndry;
-            P(mesh->xstart - 1, y, z) = new_bndry;
-            P(mesh->xstart - 2, y, z) = new_bndry;
-          }
+    if (mesh->firstX() && mesh->periodicY(mesh->xstart)) {
+      for (int y = mesh->ystart; y <= mesh->yend; y++) {
+        for (int z = 0; z < mesh->LocalNz; z++) {
+          const BoutReal target_bndry =
+              2.0 * core_boundary_target - P(mesh->xstart, y, z);
+          const BoutReal new_bndry = core_boundary_weight * P(mesh->xstart - 1, y, z)
+                                      + (1.0 - core_boundary_weight) * target_bndry;
+          P(mesh->xstart - 1, y, z) = new_bndry;
+          P(mesh->xstart - 2, y, z) = new_bndry;
         }
       }
     }

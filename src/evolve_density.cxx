@@ -276,31 +276,36 @@ void EvolveDensity::finally(const Options& state) {
   N.setBoundaryTo(get<Field3D>(species["density"]));
 
   if (core_boundary_relax) {
-    // Same exponential-relaxation idiom as vorticity.cxx's phi_boundary_relax:
-    // re-apply every step rather than relying on the generic dirichlet BoundaryOp,
-    // which setBoundaryTo() above overwrites before it can have any lasting effect.
+    // Same exponential-relaxation idiom as vorticity.cxx's phi_boundary_relax,
+    // but the guard-cell write itself must happen on *every* call, not just
+    // when time has advanced: neumann_boundary_average_z's code above (in
+    // transform_impl, called before finally() on every RHS call, including
+    // repeated Newton-iteration/Jacobian calls at the same reported time)
+    // unconditionally overwrites these same guard cells. Gating the write
+    // itself (rather than just the weight update) meant this relaxation lost
+    // that race every time and had no lasting effect at all.
     const BoutReal time = get<BoutReal>(state["time"]);
 
     if (core_boundary_last_update < 0.0) {
       core_boundary_last_update = time;
     } else if (time > core_boundary_last_update) {
-      const BoutReal weight =
+      core_boundary_weight =
           exp(-(time - core_boundary_last_update) / core_boundary_timescale);
       core_boundary_last_update = time;
+    }
 
-      if (mesh->firstX() && mesh->periodicY(mesh->xstart)) {
-        // Restrict to the closed-flux-surface core -- same periodicY(x) check
-        // already used by source_only_in_core above -- not any private-flux
-        // leg that may also touch x=0.
-        for (int y = mesh->ystart; y <= mesh->yend; y++) {
-          for (int z = 0; z < mesh->LocalNz; z++) {
-            const BoutReal target_bndry =
-                2.0 * core_boundary_target - N(mesh->xstart, y, z);
-            const BoutReal new_bndry =
-                weight * N(mesh->xstart - 1, y, z) + (1.0 - weight) * target_bndry;
-            N(mesh->xstart - 1, y, z) = new_bndry;
-            N(mesh->xstart - 2, y, z) = new_bndry;
-          }
+    if (mesh->firstX() && mesh->periodicY(mesh->xstart)) {
+      // Restrict to the closed-flux-surface core -- same periodicY(x) check
+      // already used by source_only_in_core above -- not any private-flux
+      // leg that may also touch x=0.
+      for (int y = mesh->ystart; y <= mesh->yend; y++) {
+        for (int z = 0; z < mesh->LocalNz; z++) {
+          const BoutReal target_bndry =
+              2.0 * core_boundary_target - N(mesh->xstart, y, z);
+          const BoutReal new_bndry = core_boundary_weight * N(mesh->xstart - 1, y, z)
+                                      + (1.0 - core_boundary_weight) * target_bndry;
+          N(mesh->xstart - 1, y, z) = new_bndry;
+          N(mesh->xstart - 2, y, z) = new_bndry;
         }
       }
     }

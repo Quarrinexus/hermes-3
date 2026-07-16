@@ -65,6 +65,10 @@ private:
   BoutReal core_boundary_target;      ///< Target value for the core boundary [normalised]
   BoutReal core_boundary_timescale;   ///< Relaxation timescale [normalised time]
   BoutReal core_boundary_last_update{-1.0}; ///< Time of last core boundary update
+  BoutReal core_boundary_weight{1.0}; ///< Last computed relaxation weight, reapplied on
+                                      ///< repeated-same-time RHS calls so this always
+                                      ///< wins over neumann_boundary_average_z's
+                                      ///< unconditional reset in transform_impl
 
   BoutReal density_floor;
 
