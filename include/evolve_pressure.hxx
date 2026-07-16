@@ -67,6 +67,11 @@ private:
   bool poloidal_flows;
   bool thermal_conduction; ///< Include thermal conduction?
 
+  bool core_boundary_relax;           ///< Relax the core (x=0) boundary toward a target?
+  BoutReal core_boundary_target;      ///< Target value for the core boundary [normalised]
+  BoutReal core_boundary_timescale;   ///< Relaxation timescale [normalised time]
+  BoutReal core_boundary_last_update{-1.0}; ///< Time of last core boundary update
+
   bool p_div_v; ///< Use p*Div(v) form? False -> v * Grad(p)
 
   bool evolve_log; ///< Evolve logarithm of P?

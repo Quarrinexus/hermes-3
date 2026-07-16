@@ -157,6 +157,22 @@ EvolveDensity::EvolveDensity(std::string name, Options& alloptions, Solver* solv
           .doc("Apply neumann boundary with Z average?")
           .withDefault<bool>(false);
 
+  core_boundary_relax = n_options["core_boundary_relax"]
+      .doc("Relax the core (periodic-Y, x=0) boundary towards core_boundary_target? "
+           "Needed because bndry_core alone has no lasting effect -- it is "
+           "overwritten every step by the density-state boundary copy in finally().")
+      .withDefault<bool>(false);
+
+  if (core_boundary_relax) {
+    core_boundary_target = n_options["core_boundary_target"]
+        .doc("Target value to relax the core boundary towards [normalised]")
+        .as<BoutReal>();
+
+    core_boundary_timescale = n_options["core_boundary_timescale"]
+        .doc("Timescale for the core boundary relaxation [normalised time]")
+        .withDefault(1e-2);
+  }
+
   std::vector<std::string> outputs = {"AA", "density", "density_source"};
   if (charge != 0.) {
     outputs.push_back("charge");
@@ -258,6 +274,37 @@ void EvolveDensity::finally(const Options& state) {
   // Get density boundary conditions
   // but retain densities which fall below zero
   N.setBoundaryTo(get<Field3D>(species["density"]));
+
+  if (core_boundary_relax) {
+    // Same exponential-relaxation idiom as vorticity.cxx's phi_boundary_relax:
+    // re-apply every step rather than relying on the generic dirichlet BoundaryOp,
+    // which setBoundaryTo() above overwrites before it can have any lasting effect.
+    const BoutReal time = get<BoutReal>(state["time"]);
+
+    if (core_boundary_last_update < 0.0) {
+      core_boundary_last_update = time;
+    } else if (time > core_boundary_last_update) {
+      const BoutReal weight =
+          exp(-(time - core_boundary_last_update) / core_boundary_timescale);
+      core_boundary_last_update = time;
+
+      if (mesh->firstX() && mesh->periodicY(mesh->xstart)) {
+        // Restrict to the closed-flux-surface core -- same periodicY(x) check
+        // already used by source_only_in_core above -- not any private-flux
+        // leg that may also touch x=0.
+        for (int y = mesh->ystart; y <= mesh->yend; y++) {
+          for (int z = 0; z < mesh->LocalNz; z++) {
+            const BoutReal target_bndry =
+                2.0 * core_boundary_target - N(mesh->xstart, y, z);
+            const BoutReal new_bndry =
+                weight * N(mesh->xstart - 1, y, z) + (1.0 - weight) * target_bndry;
+            N(mesh->xstart - 1, y, z) = new_bndry;
+            N(mesh->xstart - 2, y, z) = new_bndry;
+          }
+        }
+      }
+    }
+  }
 
   if ((fabs(charge) > 1e-5) and state.isSection("fields")
       and state["fields"].isSet("phi")) {

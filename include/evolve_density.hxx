@@ -61,6 +61,11 @@ private:
   bool poloidal_flows;  ///< Include ExB flow in Y direction?
   bool neumann_boundary_average_z; ///< Apply neumann boundary with Z average?
 
+  bool core_boundary_relax;           ///< Relax the core (x=0) boundary toward a target?
+  BoutReal core_boundary_target;      ///< Target value for the core boundary [normalised]
+  BoutReal core_boundary_timescale;   ///< Relaxation timescale [normalised time]
+  BoutReal core_boundary_last_update{-1.0}; ///< Time of last core boundary update
+
   BoutReal density_floor;
 
   BoutReal density_source_floor; ///< Floor below which an artificial density source is enabled

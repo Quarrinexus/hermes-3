@@ -162,6 +162,22 @@ EvolvePressure::EvolvePressure(std::string name, Options& alloptions, Solver* so
                                    .doc("Apply neumann boundary with Z average?")
                                    .withDefault<bool>(false);
 
+  core_boundary_relax = p_options["core_boundary_relax"]
+      .doc("Relax the core (periodic-Y, x=0) boundary towards core_boundary_target? "
+           "Needed because bndry_core alone has no lasting effect -- it is "
+           "overwritten every step by the pressure-state boundary copy in finally().")
+      .withDefault<bool>(false);
+
+  if (core_boundary_relax) {
+    core_boundary_target = p_options["core_boundary_target"]
+        .doc("Target value to relax the core boundary towards [normalised]")
+        .as<BoutReal>();
+
+    core_boundary_timescale = p_options["core_boundary_timescale"]
+        .doc("Timescale for the core boundary relaxation [normalised time]")
+        .withDefault(1e-2);
+  }
+
   numerical_viscous_heating = options["numerical_viscous_heating"]
                                   .doc("Include heating due to numerical viscosity?")
                                   .withDefault<bool>(false);
@@ -251,6 +267,32 @@ void EvolvePressure::finally(const Options& state) {
   // Note: Retain pressures which fall below zero
   P.clearParallelSlices();
   P.setBoundaryTo(get<Field3D>(species["pressure"]));
+
+  if (core_boundary_relax) {
+    const BoutReal time = get<BoutReal>(state["time"]);
+
+    if (core_boundary_last_update < 0.0) {
+      core_boundary_last_update = time;
+    } else if (time > core_boundary_last_update) {
+      const BoutReal weight =
+          exp(-(time - core_boundary_last_update) / core_boundary_timescale);
+      core_boundary_last_update = time;
+
+      if (mesh->firstX() && mesh->periodicY(mesh->xstart)) {
+        for (int y = mesh->ystart; y <= mesh->yend; y++) {
+          for (int z = 0; z < mesh->LocalNz; z++) {
+            const BoutReal target_bndry =
+                2.0 * core_boundary_target - P(mesh->xstart, y, z);
+            const BoutReal new_bndry =
+                weight * P(mesh->xstart - 1, y, z) + (1.0 - weight) * target_bndry;
+            P(mesh->xstart - 1, y, z) = new_bndry;
+            P(mesh->xstart - 2, y, z) = new_bndry;
+          }
+        }
+      }
+    }
+  }
+
   const Field3D Pfloor = floor(P, 0.0); // Restricted to never go below zero
 
   T = get<Field3D>(species["temperature"]);
